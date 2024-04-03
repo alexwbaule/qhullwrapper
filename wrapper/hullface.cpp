@@ -636,7 +636,7 @@ namespace qhullWrapper
                     regionMesh.hullarea += areas[f];
                     normal += areanormals[f];
                     for (int j = 0; j < 3; ++j) {
-                        mesh->vertices.emplace_back(std::move(vertexs[faces[f][j]]));
+                        mesh->vertices.emplace_back(vertexs[faces[f][j]]);
                     }
                     mesh->faces.emplace_back(std::move(trimesh::TriMesh::Face(3 * i, 3 * i + 1, 3 * i + 2)));
                 }
@@ -680,13 +680,17 @@ namespace qhullWrapper
                 }
             }
         }
-        auto flatHullFaces = [&](trimesh::TriMesh * inmesh, const trimesh::vec3 & normal) {
+		auto flatHullFaces = [&](HullFace& hullFace) {
+			trimesh::TriMesh* inmesh = hullFace.mesh.get();
+			trimesh::vec3 normal = hullFace.normal;
+			//hullFace->write("test/before.stl");
             const auto& apoints = inmesh->vertices;
             float d = std::numeric_limits<float>::lowest();
             for (const auto& p : apoints) {
                 const auto& project = (p DOT normal);
                 if (project > d) {
-                    d = project;
+					hullFace.pt = p;
+					d = project;
                 }
             }
             std::vector<trimesh::vec3> newPts;
@@ -696,13 +700,10 @@ namespace qhullWrapper
                 newPts.emplace_back(p - (normal * dist));
             }
             inmesh->vertices.swap(newPts);
+			//hullFace->write("test/after.stl");
         };
-        for (auto& hullMesh : hullFaces) {
-            trimesh::TriMesh* hull = hullMesh.mesh.get();
-            //hull->write("test/before.stl");
-            const auto& normal = hullMesh.normal;
-            flatHullFaces(hull, normal);
-            //hull->write("test/after.stl");
+        for (auto& hullFace : hullFaces) {
+            flatHullFaces(hullFace);
         }
         /*for (int i = 0; i < hullFaces.size(); ++i) {
             hullFaces[i].mesh->write("test/separates" + std::to_string(i) + ".stl");
@@ -819,4 +820,148 @@ namespace qhullWrapper
             hullFaces[i].mesh->write("test/hullfaces" + std::to_string(i) + ".stl");
         }*/
     }
+	
+	void hullFacesFromMeshNear(const HMeshPtr& mesh, std::vector<HullFace>& hullFaces, float thresholdNormal)
+	{
+		//mesh->write("boat.stl");
+		const auto& faces = mesh->faces;
+		const auto& points = mesh->vertices;
+		const int facenums = faces.size();
+		std::vector<trimesh::vec3> normals;
+		normals.reserve(facenums);
+		for (const auto& f : faces) {
+			const auto& a = points[f[0]];
+			const auto& b = points[f[1]];
+			const auto& c = points[f[2]];
+			trimesh::vec3 n = 0.5 * (b - a)TRICROSS(c - a);
+			trimesh::normalize(n);
+			normals.emplace_back(n);
+		}
+		std::vector<int> selectFaces;
+		selectFaces.reserve(facenums);
+		std::vector<bool> marks(facenums, true);
+		auto selectLargestPart = [&](trimesh::TriMesh& input, trimesh::TriMesh& partMesh) {
+			qhullWrapper::dumplicateMesh(&input);
+			const auto& points = input.vertices;
+			const auto& faces = input.faces;
+			const int nums = faces.size();
+			std::vector<float> areas;
+			areas.reserve(nums);
+			for (const auto& f : faces) {
+				const auto& a = points[f[0]];
+				const auto& b = points[f[1]];
+				const auto& c = points[f[2]];
+				trimesh::vec3 n = 0.5 * (b - a)TRICROSS(c - a);
+				areas.emplace_back(len(n));
+			}
+			input.need_across_edge();
+			auto neighbors = input.across_edge;
+			std::vector<bool> marks(nums, true);
+			std::vector<std::vector<int>> parts;
+			for (int f = 0; f < nums; ++f) {
+				if (marks[f]) {
+					std::vector<int>currentFaces;
+					std::queue<int>currentQueue;
+					currentQueue.emplace(f);
+					currentFaces.emplace_back(f);
+					marks[f] = false;
+					while (!currentQueue.empty()) {
+						auto fr = currentQueue.front();
+						currentQueue.pop();
+						const auto& neighbor = neighbors[fr];
+						for (const auto& fa : neighbor) {
+							if (fa < 0) continue;
+							if (marks[fa]) {
+								currentQueue.emplace(fa);
+								currentFaces.emplace_back(fa);
+								marks[fa] = false;
+							}
+						}
+					}
+					parts.emplace_back(currentFaces);
+				}
+			}
+			float maxArea = 0.0f;
+			std::vector<int> largestPart;
+			for (const auto& part : parts) {
+				float sumArea = 0.0f;
+				for (const auto& f : part) {
+					sumArea += areas[f];
+				}
+				if (sumArea > maxArea) {
+					maxArea = sumArea;
+					largestPart = part;
+				}
+			}
+			partMesh.faces.reserve(largestPart.size());
+			partMesh.vertices.reserve(largestPart.size() * 3);
+			for (const auto& f : largestPart) {
+				const auto& fa = faces[f];
+				const int v0 = partMesh.vertices.size();
+				partMesh.vertices.emplace_back(points[fa[0]]);
+				partMesh.vertices.emplace_back(points[fa[1]]);
+				partMesh.vertices.emplace_back(points[fa[2]]);
+				partMesh.faces.emplace_back(trimesh::ivec3(v0, v0 + 1, v0 + 2));
+			}
+			qhullWrapper::dumplicateMesh(&partMesh);
+		};
+		for (auto& hullFace : hullFaces) {
+			selectFaces.clear();
+			const auto& dir = hullFace.normal;
+			for (int i = 0; i < normals.size(); ++i) {
+				if (marks[i] && ((normals[i] DOT dir) >= thresholdNormal)) {
+					selectFaces.emplace_back(i);
+					marks[i] = false;
+				}
+			}
+			if (selectFaces.empty()) {
+				hullFace.hulldist = std::numeric_limits<float>::max();
+			} else {
+				trimesh::TriMesh selectMesh;
+				selectMesh.faces.reserve(selectFaces.size());
+				selectMesh.vertices.reserve(selectFaces.size() * 3);
+				for (const auto& f : selectFaces) {
+					const auto& fa = faces[f];
+					const int v0 = selectMesh.vertices.size();
+					selectMesh.vertices.emplace_back(points[fa[0]]);
+					selectMesh.vertices.emplace_back(points[fa[1]]);
+					selectMesh.vertices.emplace_back(points[fa[2]]);
+					selectMesh.faces.emplace_back(trimesh::ivec3(v0, v0 + 1, v0 + 2));
+				}
+				//selectMesh.write("selectMesh.stl");
+				trimesh::TriMesh partMesh;
+				selectLargestPart(selectMesh, partMesh);
+				//partMesh.write("partMesh.stl");
+				const auto& ppoints = partMesh.vertices;
+				const auto& pfaces = partMesh.faces;
+				const int pnums = pfaces.size();
+				std::vector<trimesh::vec3> pcenters;
+				std::vector<float> pareas;
+				pcenters.reserve(pnums);
+				pareas.reserve(pnums);
+				for (const auto& f : pfaces) {
+					const auto& a = ppoints[f[0]];
+					const auto& b = ppoints[f[1]];
+					const auto& c = ppoints[f[2]];
+					pcenters.emplace_back((a + b + c) / 3.0);
+					trimesh::vec3 n = 0.5 * (b - a)TRICROSS(c - a);
+					pareas.emplace_back(len(n));
+				}
+				float sumArea = 0.0f;
+				float sumDist = 0.0f;
+				const auto& p = hullFace.pt;
+				for (int f = 0; f < pnums; ++f) {
+					sumArea += pareas[f];
+					const auto& v = p - pcenters[f];
+					float d = v DOT dir;
+					sumDist += pareas[f] * (v DOT dir);
+				}
+				hullFace.hulldist = sumDist / sumArea;
+			}
+		}
+		std::sort(hullFaces.begin(), hullFaces.end(), [=](HullFace& hulla, HullFace& hullb) {
+			if (hulla.hulldist <= 1.0f && hullb.hulldist <= 1.0f) return hulla.hullarea > hullb.hullarea;
+			else return hulla.hulldist < hullb.hulldist;
+		});
+	}
 }
