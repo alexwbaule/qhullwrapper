@@ -828,133 +828,94 @@ namespace qhullWrapper
 		const auto& points = mesh->vertices;
 		const int facenums = faces.size();
 		std::vector<trimesh::vec3> normals;
+		std::vector<trimesh::vec3> centers;
+		std::vector<float> areas;
 		normals.reserve(facenums);
+		centers.reserve(facenums);
+		areas.reserve(facenums);
 		for (const auto& f : faces) {
 			const auto& a = points[f[0]];
 			const auto& b = points[f[1]];
 			const auto& c = points[f[2]];
-			trimesh::vec3 n = 0.5 * (b - a)TRICROSS(c - a);
+			trimesh::vec3 n = 0.5 * ((b - a)TRICROSS(c - a));
+			centers.emplace_back((a + b + c) / 3.0);
+			areas.emplace_back(trimesh::len(n));
 			trimesh::normalize(n);
 			normals.emplace_back(n);
 		}
-		std::vector<int> selectFaces;
-		selectFaces.reserve(facenums);
-		std::vector<bool> marks(facenums, true);
-		auto selectLargestPart = [&](trimesh::TriMesh& input, trimesh::TriMesh& partMesh) {
-			qhullWrapper::dumplicateMesh(&input);
-			const auto& points = input.vertices;
-			const auto& faces = input.faces;
-			const int nums = faces.size();
-			std::vector<float> areas;
-			areas.reserve(nums);
-			for (const auto& f : faces) {
-				const auto& a = points[f[0]];
-				const auto& b = points[f[1]];
-				const auto& c = points[f[2]];
-				trimesh::vec3 n = 0.5 * (b - a)TRICROSS(c - a);
-				areas.emplace_back(len(n));
-			}
-			input.need_across_edge();
-			auto neighbors = input.across_edge;
-			std::vector<bool> marks(nums, true);
-			std::vector<std::vector<int>> parts;
-			for (int f = 0; f < nums; ++f) {
-				if (marks[f]) {
-					std::vector<int>currentFaces;
-					std::queue<int>currentQueue;
-					currentQueue.emplace(f);
-					currentFaces.emplace_back(f);
-					marks[f] = false;
-					while (!currentQueue.empty()) {
-						auto fr = currentQueue.front();
-						currentQueue.pop();
-						const auto& neighbor = neighbors[fr];
-						for (const auto& fa : neighbor) {
-							if (fa < 0) continue;
-							if (marks[fa]) {
-								currentQueue.emplace(fa);
-								currentFaces.emplace_back(fa);
-								marks[fa] = false;
-							}
-						}
-					}
-					parts.emplace_back(currentFaces);
-				}
-			}
-			float maxArea = 0.0f;
-			std::vector<int> largestPart;
-			for (const auto& part : parts) {
-				float sumArea = 0.0f;
-				for (const auto& f : part) {
-					sumArea += areas[f];
-				}
-				if (sumArea > maxArea) {
-					maxArea = sumArea;
-					largestPart = part;
-				}
-			}
-			partMesh.faces.reserve(largestPart.size());
-			partMesh.vertices.reserve(largestPart.size() * 3);
-			for (const auto& f : largestPart) {
-				const auto& fa = faces[f];
-				const int v0 = partMesh.vertices.size();
-				partMesh.vertices.emplace_back(points[fa[0]]);
-				partMesh.vertices.emplace_back(points[fa[1]]);
-				partMesh.vertices.emplace_back(points[fa[2]]);
-				partMesh.faces.emplace_back(trimesh::ivec3(v0, v0 + 1, v0 + 2));
-			}
-			qhullWrapper::dumplicateMesh(&partMesh);
-		};
+		std::vector<bool> flags(facenums, true);
 		for (auto& hullFace : hullFaces) {
-			selectFaces.clear();
+			std::vector<int> selectFaces;
+			selectFaces.reserve(facenums);
+			const auto& pt = hullFace.pt;
 			const auto& dir = hullFace.normal;
 			for (int i = 0; i < normals.size(); ++i) {
-				if (marks[i] && ((normals[i] DOT dir) >= thresholdNormal)) {
+				if (flags[i] && ((normals[i] DOT dir) >= thresholdNormal)) {
 					selectFaces.emplace_back(i);
-					marks[i] = false;
+					flags[i] = false;
 				}
 			}
 			if (selectFaces.empty()) {
 				hullFace.hulldist = std::numeric_limits<float>::max();
 			} else {
-				trimesh::TriMesh selectMesh;
-				selectMesh.faces.reserve(selectFaces.size());
-				selectMesh.vertices.reserve(selectFaces.size() * 3);
-				for (const auto& f : selectFaces) {
-					const auto& fa = faces[f];
-					const int v0 = selectMesh.vertices.size();
-					selectMesh.vertices.emplace_back(points[fa[0]]);
-					selectMesh.vertices.emplace_back(points[fa[1]]);
-					selectMesh.vertices.emplace_back(points[fa[2]]);
-					selectMesh.faces.emplace_back(trimesh::ivec3(v0, v0 + 1, v0 + 2));
-				}
-				//selectMesh.write("selectMesh.stl");
-				trimesh::TriMesh partMesh;
-				selectLargestPart(selectMesh, partMesh);
-				//partMesh.write("partMesh.stl");
-				const auto& ppoints = partMesh.vertices;
-				const auto& pfaces = partMesh.faces;
-				const int pnums = pfaces.size();
-				std::vector<trimesh::vec3> pcenters;
-				std::vector<float> pareas;
-				pcenters.reserve(pnums);
-				pareas.reserve(pnums);
-				for (const auto& f : pfaces) {
-					const auto& a = ppoints[f[0]];
-					const auto& b = ppoints[f[1]];
-					const auto& c = ppoints[f[2]];
-					pcenters.emplace_back((a + b + c) / 3.0);
-					trimesh::vec3 n = 0.5 * (b - a)TRICROSS(c - a);
-					pareas.emplace_back(len(n));
-				}
+				std::vector<int> largestPart;
+				auto selectLargestPart = [&centers, &areas, &dir](std::vector<int>& inputFace, std::vector<int>& largestPart) {
+					std::vector<std::vector<int>> parts;
+					const int nums = inputFace.size();
+					std::queue<int> inputQueues;
+					parts.reserve(100);
+					for (const auto& f : inputFace) {
+						inputQueues.emplace(f);
+					}
+					while (!inputQueues.empty()) {
+						std::vector<int> currentFaces;
+						currentFaces.reserve(nums);
+						int fr = inputQueues.front();
+						inputQueues.pop();
+						currentFaces.emplace_back(fr);
+						const auto& pr = centers[fr];
+						int count = inputQueues.size();
+						int curTime = 0;
+						while (!inputQueues.empty()) {
+							int fa = inputQueues.front();
+							const auto& pa = centers[fa];
+							float dist = (pr - pa) DOT dir;
+							inputQueues.pop();
+							if (std::fabs(dist) <= 1.0f) {
+								currentFaces.emplace_back(fa);
+								curTime = 0;
+								--count;
+							} else {
+								inputQueues.emplace(fa);
+								++curTime;
+							}
+							if (curTime >= count) {
+								break;
+							}
+						}
+						parts.emplace_back(currentFaces);
+					}
+					largestPart.clear();
+					float maxArea = 0.0f;
+					for (auto& part : parts) {
+						float sumArea = 0.0f;
+						for (const auto& f : part) {
+							sumArea += areas[f];
+						}
+						if (sumArea > maxArea) {
+							maxArea = sumArea;
+							largestPart.swap(part);
+						}
+					}
+				};
+
+				selectLargestPart(selectFaces, largestPart);
 				float sumArea = 0.0f;
 				float sumDist = 0.0f;
-				const auto& p = hullFace.pt;
-				for (int f = 0; f < pnums; ++f) {
-					sumArea += pareas[f];
-					const auto& v = p - pcenters[f];
-					float d = v DOT dir;
-					sumDist += pareas[f] * (v DOT dir);
+				for (const auto& f : largestPart) {
+					sumArea += areas[f];
+					const auto& v = pt - centers[f];
+					sumDist += areas[f] * (v DOT dir);
 				}
 				hullFace.hulldist = sumDist / sumArea;
 			}
