@@ -556,6 +556,23 @@ namespace qhullWrapper
 		return meshes;
 	}
 
+	void FaceGenerateMesh(const trimesh::TriMesh* inputMesh, std::vector<int>& inputface, trimesh::TriMesh& newMesh)
+	{
+		const auto& faces = inputMesh->faces;
+		const auto& points = inputMesh->vertices;
+		const size_t nums = inputface.size();
+		newMesh.vertices.reserve(3 * nums);
+		newMesh.faces.reserve(nums);
+		for (int i = 0; i < nums; ++i) {
+			const auto& f = faces[inputface[i]];
+			newMesh.vertices.emplace_back(points[f[0]]);
+			newMesh.vertices.emplace_back(points[f[1]]);
+			newMesh.vertices.emplace_back(points[f[2]]);
+			newMesh.faces.emplace_back(trimesh::vec3(3 * i, 3 * i + 1, 3 * i + 2));
+		}
+		qhullWrapper::dumplicateMesh(&newMesh);
+	}
+
     void hullFacesFromConvexMesh(trimesh::TriMesh* convexMesh, std::vector<HullFace>& hullFaces, float thresholdNormal)
     {
         qhullWrapper::dumplicateMesh(convexMesh);
@@ -821,7 +838,7 @@ namespace qhullWrapper
         }*/
     }
 	
-	void hullFacesFromMeshNear(const HMeshPtr& mesh, std::vector<HullFace>& hullFaces, float thresholdNormal)
+	void hullFacesFromMeshNear(const HMeshPtr& mesh, std::vector<HullFace>& hullFaces, float thresholdNormal, float dmin)
 	{
 		//mesh->write("boat.stl");
 		const auto& faces = mesh->faces;
@@ -851,15 +868,19 @@ namespace qhullWrapper
 			const auto& dir = hullFace.normal;
 			for (int i = 0; i < normals.size(); ++i) {
 				if (flags[i] && ((normals[i] DOT dir) >= thresholdNormal)) {
-					selectFaces.emplace_back(i);
 					flags[i] = false;
+					const auto& pc = centers[i];
+					float d = (pt - pc) DOT dir;
+					if (std::fabs(d) <= dmin) {
+						selectFaces.emplace_back(i);
+					}
 				}
 			}
 			if (selectFaces.empty()) {
 				hullFace.hulldist = std::numeric_limits<float>::max();
 			} else {
 				std::vector<int> largestPart;
-				auto selectLargestPart = [&centers, &areas, &dir](std::vector<int>& inputFace, std::vector<int>& largestPart) {
+				auto selectLargestPart = [&centers, &areas, &dir, &pt, &dmin](const std::vector<int>& inputFace, std::vector<int>& largestPart) {
 					std::vector<std::vector<int>> parts;
 					const int nums = inputFace.size();
 					std::queue<int> inputQueues;
@@ -871,9 +892,11 @@ namespace qhullWrapper
 						std::vector<int> currentFaces;
 						currentFaces.reserve(nums);
 						int fr = inputQueues.front();
-						inputQueues.pop();
-						currentFaces.emplace_back(fr);
 						const auto& pr = centers[fr];
+						inputQueues.pop();
+						float d = (pt - pr) DOT dir;
+						if (std::fabs(d) > dmin) continue;
+						currentFaces.emplace_back(fr);
 						int count = inputQueues.size();
 						int curTime = 0;
 						while (!inputQueues.empty()) {
@@ -881,7 +904,7 @@ namespace qhullWrapper
 							const auto& pa = centers[fa];
 							float dist = (pr - pa) DOT dir;
 							inputQueues.pop();
-							if (std::fabs(dist) <= 1.0f) {
+							if (std::fabs(dist) <= dmin) {
 								currentFaces.emplace_back(fa);
 								curTime = 0;
 								--count;
@@ -908,20 +931,28 @@ namespace qhullWrapper
 						}
 					}
 				};
-
+				
 				selectLargestPart(selectFaces, largestPart);
-				float sumArea = 0.0f;
-				float sumDist = 0.0f;
+				//trimesh::TriMesh selectMesh, partMesh;
+				//FaceGenerateMesh(mesh.get(), selectFaces, selectMesh);
+				//hullFace.mesh->write("test/hullmesh.stl");
+				//selectMesh.write("test/selectMesh.stl");
+				//FaceGenerateMesh(mesh.get(), largestPart, partMesh);
+				//partMesh.write("test/partMesh.stl");
+				float partArea = 0.0f, partDist = 0.0f;
 				for (const auto& f : largestPart) {
-					sumArea += areas[f];
-					const auto& v = pt - centers[f];
-					sumDist += areas[f] * (v DOT dir);
+					const auto& area = areas[f];
+					const auto& pc = centers[f];
+					float d = std::fabs((pt - pc) DOT dir);
+					partDist += area * d;
+					partArea += area;
 				}
-				hullFace.hulldist = sumDist / sumArea;
+				hullFace.hulldist = partDist / partArea;
+				hullFace.hullarea = partArea;
 			}
 		}
 		std::sort(hullFaces.begin(), hullFaces.end(), [=](HullFace& hulla, HullFace& hullb) {
-			if (hulla.hulldist <= 1.0f && hullb.hulldist <= 1.0f) return hulla.hullarea > hullb.hullarea;
+			if (hulla.hulldist <= dmin && hullb.hulldist <= dmin) return hulla.hullarea > hullb.hullarea;
 			else return hulla.hulldist < hullb.hulldist;
 		});
 	}
