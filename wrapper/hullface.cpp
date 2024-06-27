@@ -620,8 +620,12 @@ namespace qhullWrapper
                         if (masks[fa]) {
                             const auto& na = normals[fa];
                             const auto& nr = normals[fr];
-                            const auto& dir = sumNormal / sumArea;
-                            if ((nr DOT dir) >= thresholdNormal && (dir DOT na) >= thresholdNormal) {
+                            //const auto& dir = sumNormal / sumArea;
+                            //if ((nr DOT dir) >= thresholdNormal && (dir DOT na) >= thresholdNormal)
+                            if (std::abs(nr.at(0) - na.at(0)) < 0.001
+                                && std::abs(nr.at(1) - na.at(1)) < 0.001
+                                && std::abs(nr.at(2) - na.at(2)) < 0.001)
+                            {
                                 currentQueue.emplace(fa);
                                 currentFaces.emplace_back(fa);
                                 sumNormal += areanormals[fa];
